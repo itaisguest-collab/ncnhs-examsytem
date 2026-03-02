@@ -16,6 +16,11 @@
         <span class="material-icons-round">add</span>
         Create New Survey
       </router-link>
+      <label class ="import-btn">
+        <span class="material-icons-round">file_upload</span>
+        Import Survey
+        <input type="file" @change="handleFileChange" accept=".json" style="display:none;" />
+      </label>
     </div>
 
     <!-- Loading State -->
@@ -106,7 +111,23 @@
             <span class="material-icons-round">share</span>
             Share
           </button>
+<button 
+  class="action-btn export-btn" 
+  @click="exportToCSV(survey)"
+  title="Export Responses to CSV"
+>
+  <span class="material-icons-round">download</span>
+  Export CSV
+</button>
 
+<button 
+  class="action-btn download-btn"
+  @click="downloadSurveyJSON(survey)"
+  title="Export Survey JSON"
+>
+  <span class="material-icons-round">download</span>
+  Export Survey
+</button>
           <button 
             class="action-btn toggle-btn"
             :class="{ 'inactive': !survey.isActive }"
@@ -136,7 +157,7 @@
 <script>
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { fetchUserSurveys, SOCKET_URL } from '@/services/authService';
+import { fetchUserSurveys,fetchSurveyResults, fetchSurvey,createSurvey,SOCKET_URL } from '@/services/authService';
 import Swal from 'sweetalert2';
 
 export default {
@@ -171,6 +192,190 @@ export default {
     const viewResults = (survey) => {
       router.push(`/survey/${survey.code}/results`);
     };
+// Returns a unique title based on existing surveys
+const getUniqueTitle = (title, existingSurveys) => {
+  const titles = existingSurveys.map(s => s.title);
+  if (!titles.includes(title)) return title;
+
+  let i = 1;
+  let newTitle = `${title} (${i})`;
+
+  while (titles.includes(newTitle)) {
+    i++;
+    newTitle = `${title} (${i})`;
+  }
+
+  return newTitle;
+};
+ const importSurveyJSON = async (file) => {
+  if (!file) return;
+
+  try {
+    // Read the file as text
+    const text = await file.text();
+    const json = JSON.parse(text);
+    const uniqueTitle = getUniqueTitle(json.survey.title || 'Survey', surveys.value);
+  
+
+    // Basic validation
+    if (!json.survey || !json.questions) {
+      Swal.fire('Invalid File', 'This JSON does not contain a valid survey structure.', 'error');
+      return;
+    }
+
+    // Build payload for your API
+    const surveyPayload = {
+      title: uniqueTitle,
+      description: json.survey.description,
+      isActive: json.survey.isActive ?? false,
+      questions: json.questions.map(q => ({
+        questionText: q.questionText,
+        questionType: q.questionType,
+        options: q.options,
+        required: q.required,
+        order: q.order
+      }))
+    };
+
+    // Create the survey using your service
+    const createdSurvey = await createSurvey(surveyPayload);
+ Swal.fire('Success', `Survey "${uniqueTitle}" imported successfully!`, 'success');
+   
+    return createdSurvey;
+
+  } catch (err) {
+    console.error(err);
+    Swal.fire('Error', err.message || 'Failed to import survey.', 'error');
+  }
+};
+    // Export survey + questions as JSON
+const downloadSurveyJSON = async (survey) => {
+  try {
+ const data = await fetchSurvey(survey.code);
+
+// Use `data.survey.questions` instead of `data.questions`
+if (!data.survey.questions || !data.survey.questions.length) {
+  Swal.fire('No Questions', 'This survey has no questions.', 'info');
+  return;
+}
+
+const exportData = {
+  survey: {
+    title: data.survey.title,
+    description: data.survey.description,
+    code: data.survey.code,
+    isActive: data.survey.isActive,
+    createdAt: data.survey.createdAt,
+    updatedAt: data.survey.updatedAt
+  },
+  questions: data.survey.questions.map(q => ({
+    questionText: q.questionText,
+    questionType: q.questionType,
+    options: q.options,
+    required: q.required,
+    order: q.order
+  }))
+};
+
+    // Convert to JSON string
+    const jsonString = JSON.stringify(exportData, null, 2);
+
+    // Create a download blob
+    const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${data.title}-survey.json`;
+    link.click();
+
+    URL.revokeObjectURL(url);
+
+  } catch (error) {
+    console.error(error);
+    Swal.fire('Error', 'Failed to download survey JSON.', 'error');
+  }
+};
+const exportToCSV = async (survey) => {
+  try {
+    const data = await fetchSurveyResults(survey.code);
+
+    if (!data?.results?.questions?.length) {
+      Swal.fire('No Data', 'No responses found.', 'info');
+      return;
+    }
+
+    const questions = data.results.questions;
+
+    // 1️⃣ Collect all unique response IDs
+    const responseIds = new Set();
+    questions.forEach(q => {
+      q.answers?.forEach(a => responseIds.add(a.responseId));
+    });
+
+    const responseList = Array.from(responseIds);
+
+    // 2️⃣ Build header row
+    const headers = [
+      "Response ID",
+      ...questions.map(q => q.questionText)
+    ];
+
+    // 3️⃣ Build rows
+    const rows = responseList.map(responseId => {
+      const row = [responseId];
+
+      questions.forEach(q => {
+        const answerObj = q.answers?.find(a => a.responseId === responseId);
+
+        let value = "";
+
+        if (answerObj) {
+          if (Array.isArray(answerObj.answer)) {
+            value = answerObj.answer.join(", ");
+          } else {
+            value = answerObj.answer ?? "";
+          }
+        }
+
+        row.push(
+          `"${String(value).replace(/"/g, '""')}"`
+        );
+      });
+
+      return row.join(",");
+    });
+
+    const csvContent =
+      headers.join(",") + "\n" +
+      rows.join("\n");
+
+    const blob = new Blob([csvContent], {
+      type: "text/csv;charset=utf-8;"
+    });
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = `${survey.title}-responses.csv`;
+    link.click();
+
+    URL.revokeObjectURL(url);
+
+  } catch (error) {
+    console.error(error);
+    Swal.fire('Error', 'Failed to export responses.', 'error');
+  }
+};
+
+ const handleFileChange = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    await importSurveyJSON(file);
+  };
+
 
     const shareSurvey = async (survey) => {
       const base = (SOCKET_URL || '').replace(/\/$/, '');
@@ -252,7 +457,11 @@ export default {
       viewResults,
       shareSurvey,
       toggleSurveyStatus,
-      previewSurvey
+      previewSurvey,
+      exportToCSV,
+      downloadSurveyJSON,
+      importSurveyJSON,
+      handleFileChange
     };
   }
 };
@@ -703,7 +912,38 @@ export default {
     font-size: 18px;
   }
 }
+.import-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 12px 20px;
+  background: #0ea5e9; /* light blue like your other buttons */
+  color: white;
+  border-radius: 8px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+  overflow: hidden;
+  margin-left: 0.5rem;
+}
 
+.import-btn:hover {
+  background: #0284c7; /* darker blue on hover */
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+/* Hide the actual file input */
+.import-btn input[type="file"] {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
 @media (max-width: 480px) {
   .survey-actions {
     flex-direction: column;
